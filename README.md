@@ -102,8 +102,6 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=<your-password>
 ```
 
-Never commit this file. The repo's `.gitignore` excludes it.
-
 ---
 
 ## Step 1 — Download the Dataset
@@ -303,27 +301,6 @@ We pull the graph from Aura into a pandas DataFrame for downstream processing.
 
 ### `pull_data.py`
 
-```python
-import pandas as pd
-from config import get_driver
-
-driver = get_driver()
-
-with driver.session() as session:
-    result = session.run("""
-        MATCH (t:Transaction)-[:HAS_DEVICE]->(d:Device)
-        RETURN t.TransactionID  AS txn_id,
-               t.TransactionAmt AS amount,
-               t.isFraud        AS fraud,
-               d.DeviceInfo     AS device
-    """)
-    df = pd.DataFrame([r.data() for r in result])
-
-df.to_pickle('data/df.pkl')
-print(df.shape)
-print(df['fraud'].value_counts())
-```
-
 ### Why pickle the DataFrame?
 
 So subsequent scripts in the pipeline don't need to re-query Aura. The cache is gitignored.
@@ -339,65 +316,6 @@ PyTorch Geometric expects a `Data` object with:
 - Train/val/test masks
 
 ### `build_graph.py`
-
-```python
-import torch
-import pandas as pd
-from torch_geometric.data import Data
-from torch_geometric.transforms import RandomNodeSplit
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-
-
-def build_graph(df_path='data/df.pkl', save=True):
-    df = pd.read_pickle(df_path)
-
-    le = LabelEncoder()
-    df['device_enc'] = le.fit_transform(df['device'].fillna('Unknown'))
-    df['txn_enc'] = range(len(df))
-
-    # Normalise amount — critical for stable training
-    scaler = StandardScaler()
-    df['amount_norm'] = scaler.fit_transform(df[['amount']].fillna(0))
-
-    # Transaction node features
-    x = torch.tensor(df[['amount_norm']].values, dtype=torch.float)
-    y = torch.tensor(df['fraud'].astype(int).values, dtype=torch.long)
-
-    num_txns = len(df)
-    num_devices = df['device_enc'].nunique()
-
-    # Bidirectional edges so GNN can propagate both ways
-    src = torch.tensor(df['txn_enc'].values, dtype=torch.long)
-    dest = torch.tensor(df['device_enc'].values + num_txns, dtype=torch.long)
-    edge_index = torch.stack([
-        torch.cat([src, dest]),
-        torch.cat([dest, src])
-    ], dim=0)
-
-    # Pad device nodes — no features, no labels
-    device_x = torch.zeros((num_devices, 1), dtype=torch.float)
-    x = torch.cat([x, device_x], dim=0)
-
-    device_y = torch.full((num_devices,), -1, dtype=torch.long)
-    y = torch.cat([y, device_y], dim=0)
-
-    data = Data(x=x, edge_index=edge_index, y=y)
-
-    # Train / val / test split (70 / 10 / 20)
-    transform = RandomNodeSplit(split='train_rest', num_val=0.1, num_test=0.2)
-    data = transform(data)
-
-    # Device nodes must not appear in any mask
-    device_mask = torch.arange(len(y)) >= num_txns
-    data.train_mask[device_mask] = False
-    data.val_mask[device_mask]   = False
-    data.test_mask[device_mask]  = False
-
-    if save:
-        torch.save(data, 'data/graph.pt')
-
-    return data
-```
 
 ### Design choices explained
 
@@ -428,69 +346,9 @@ We use **GraphSAGE** (Sample and Aggregate), a popular GNN architecture that sca
 
 ### `gnn.py`
 
-```python
-import torch.nn as nn
-import torch.nn.functional as F
-from torch_geometric.nn import SAGEConv
-
-
-class GNN(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels):
-        super().__init__()
-        self.conv1 = SAGEConv(in_channels, hidden_channels)
-        self.conv2 = SAGEConv(hidden_channels, out_channels)
-
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = F.dropout(x, p=0.5, training=self.training)
-        x = self.conv2(x, edge_index)
-        return x
-```
-
 Two-layer GraphSAGE with 64 hidden units, dropout 0.5 for regularisation. The output is 2 logits per node (legit vs fraud) — softmax happens inside the loss.
 
 ### `train_gnn.py`
-
-```python
-import math
-import torch
-from gnn import GNN
-from build_graph import build_graph
-
-data = build_graph()
-
-model = GNN(in_channels=1, hidden_channels=64, out_channels=2)
-
-# Class weights to fight imbalance
-train_labels = data.y[data.train_mask]
-n_fraud = (train_labels == 1).sum().item()
-n_legit = (train_labels == 0).sum().item()
-ratio = n_legit / max(n_fraud, 1)
-weights = torch.tensor([1.0, math.sqrt(ratio)], dtype=torch.float)
-
-criterion = torch.nn.CrossEntropyLoss(weight=weights)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
-
-
-def train():
-    model.train()
-    optimizer.zero_grad()
-    out = model(data.x, data.edge_index)
-    loss = criterion(out[data.train_mask], data.y[data.train_mask])
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    optimizer.step()
-    return loss.item()
-
-
-for epoch in range(1, 101):
-    loss = train()
-    if epoch % 10 == 0:
-        print(f"Epoch {epoch:3d} | loss = {loss:.4f}")
-
-torch.save(model.state_dict(), 'data/model.pt')
-```
 
 ### Why these hyperparameters
 
@@ -502,9 +360,6 @@ The fraud class is ~13× rarer. Using the raw ratio (13×) caused the model to c
 
 **`CrossEntropyLoss` over `BCELoss`**
 Both are mathematically equivalent for binary tasks, but CrossEntropyLoss generalises trivially to multi-class — useful if we later add fraud subtypes (card testing, account takeover, etc.).
-
-**Gradient clipping at `max_norm=1.0`**
-Prevents exploding gradients early in training when class weights and graph structure can combine to produce huge gradient norms.
 
 ---
 
@@ -518,39 +373,6 @@ For imbalanced fraud detection, **accuracy is misleading**. A trivial model pred
 - **AUC-PR (average precision)** — the most reliable single metric for imbalanced binary classification
 
 ### `eval.py`
-
-```python
-import torch
-import torch.nn.functional as F
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    roc_auc_score,
-    average_precision_score
-)
-from gnn import GNN
-from build_graph import build_graph
-
-data = build_graph(save=False)
-
-model = GNN(in_channels=1, hidden_channels=64, out_channels=2)
-model.load_state_dict(torch.load('data/model.pt'))
-model.eval()
-
-with torch.no_grad():
-    out = model(data.x, data.edge_index)
-    probs = F.softmax(out, dim=1)
-    pred = out.argmax(dim=1)
-
-y_true  = data.y[data.test_mask].numpy()
-y_pred  = pred[data.test_mask].numpy()
-y_score = probs[data.test_mask, 1].numpy()
-
-print(classification_report(y_true, y_pred, target_names=['Legit', 'Fraud'], digits=4))
-print(confusion_matrix(y_true, y_pred))
-print(f"ROC-AUC: {roc_auc_score(y_true, y_score):.4f}")
-print(f"AUC-PR:  {average_precision_score(y_true, y_score):.4f}")
-```
 
 ---
 
