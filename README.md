@@ -250,6 +250,10 @@ MATCH ()-[r:HAS_DEVICE]->() RETURN count(r)
 
 Before training any model, we explore the graph to validate that the structure encodes fraud signals.
 
+![Neo4j Bloom visualisation of the transaction–device graph](bloom-visualisation.png)
+
+Visualised in Neo4j Bloom, transactions (olive) cluster around the devices (pink) they share — the dense hubs are exactly the high-volume, high-fraud devices uncovered below.
+
 ### Find suspicious devices
 
 ```cypher
