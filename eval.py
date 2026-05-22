@@ -1,8 +1,7 @@
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import (
-    classification_report, confusion_matrix, roc_auc_score, average_precision_score,
-    f1_score, precision_score, recall_score
+    classification_report, confusion_matrix, roc_auc_score, average_precision_score
 )
 
 from graph_sage import GNN
@@ -21,16 +20,8 @@ with torch.no_grad():
 y_true = data.y[data.test_mask].numpy()
 y_score = probs[data.test_mask, 1].numpy()
 
-threshold = 0.4  # Based on observed results, 0.4 seems to give a better balance between precision and recall compared to the default 0.5
-
+threshold = 0.4
 y_pred = (y_score > threshold).astype(int)
-p = precision_score(y_true, y_pred)
-r = recall_score(y_true, y_pred)
-f1 = f1_score(y_true, y_pred)
-print(f"threshold={threshold:.1f} | precision={p:.3f} | recall={r:.3f} | f1={f1:.3f}")
-
-# ── Reports (threshold=0.5) ──
-y_pred = (y_score > 0.5).astype(int)
 
 print("=" * 60)
 print("CLASSIFICATION REPORT")

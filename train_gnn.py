@@ -9,7 +9,7 @@ print(data)
 
 model = GNN(in_channels=num_feat, hidden_channels=64, out_channels=2)
 
-weights = torch.tensor([1.0, 3.0], dtype=torch.float)
+weights = torch.tensor([1.0, 3.6], dtype=torch.float)  # sqrt(110059/8607) ≈ 3.6
 
 crit = torch.nn.CrossEntropyLoss(weight=weights)
 opt = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)

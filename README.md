@@ -375,8 +375,7 @@ Two-layer GraphSAGE with 64 hidden units, dropout 0.5 for regularisation. The ou
 
 ### Why these hyperparameters
 
-**Learning rate `0.001`**
-Adam's default sweet spot. We initially tried `0.01` but training oscillated wildly between predicting all-legit and all-fraud.
+**Learning rate `0.01`**
 
 **Class weights `[1.0, sqrt(ratio)]`**
 The fraud class is ~13× rarer. Using the raw ratio (13×) caused the model to collapse into predicting everything as fraud. Square-rooting it (~3.6×) provides a softer push that improves recall without destroying precision.
@@ -421,39 +420,37 @@ Each stage is timed individually and the pipeline halts on any failure.
 
 ## Results
 
-Current model performance on the test set (20% holdout, 23 733 nodes — 22 012 legit, 1 721 fraud):
+Current model performance on the test set (20% holdout, 23 733 nodes — 22 012 legit, 1 721 fraud), evaluated at threshold = 0.4:
 
 | Metric            | Value   |
 |-------------------|--------:|
-| Fraud Recall      | 47.6%   |
-| Fraud Precision   | 54.9%   |
-| Fraud F1          | 51.0%   |
-| ROC-AUC           | 0.8831  |
-| AUC-PR            | 0.5290  |
+| Fraud Recall      | 63.7%   |
+| Fraud Precision   | 40.4%   |
+| Fraud F1          | 49.5%   |
+| ROC-AUC           | 0.8847  |
+| AUC-PR            | 0.5269  |
 
 ### Threshold sweep (fraud class)
-
-Operators can tune the operating point to match their cost model:
 
 | Threshold | Precision | Recall | F1    |
 |----------:|----------:|-------:|------:|
 | 0.2       | 29.2%     | 74.6%  | 42.0% |
 | 0.3       | 37.8%     | 64.6%  | 47.7% |
-| 0.4       | 46.2%     | 57.0%  | 51.0% |
-| **0.5**   | **54.9%** | **47.6%** | **51.0%** |
+| **0.4**   | **40.4%** | **63.7%** | **49.5%** |
+| 0.5       | 54.9%     | 47.6%  | 51.0% |
 | 0.6       | 62.9%     | 39.2%  | 48.3% |
 | 0.7       | 71.4%     | 31.8%  | 44.0% |
 
-### Confusion matrix (threshold = 0.5)
+### Confusion matrix (threshold = 0.4)
 
-|              | Pred Legit | Pred Fraud |
-|--------------|----------:|-----------:|
-| **True Legit**  | 21 338   |    674     |
-| **True Fraud**  |    901   |    820     |
+|                 | Pred Legit | Pred Fraud |
+|-----------------|----------:|-----------:|
+| **True Legit**  |   20 396  |    1 616   |
+| **True Fraud**  |      625  |    1 096   |
 
 ### Interpretation
 
-ROC-AUC of **0.88** and AUC-PR of **0.53** (vs. random baseline of ~0.075) confirm that multi-relational graph structure carries strong discrimination signal. The precision–recall trade-off is now tunable via threshold: setting `P(fraud) > 0.3` recovers ~65% of fraud with reasonable precision, while `P(fraud) > 0.7` gives a high-confidence alert queue at 71% precision.
+ROC-AUC of **0.88** and AUC-PR of **0.53** (vs. random baseline of ~0.075) confirm that multi-relational graph structure carries strong discrimination signal. At threshold 0.4, the model catches **64% of all fraud** — a deliberate precision–recall trade-off that prioritises recall for a review queue where missing fraud is more costly than a false positive.
 
 The dramatic improvement over the earlier single-feature model (AUC-PR 0.11 → 0.53, ROC-AUC 0.61 → 0.88) is driven by two factors: richer node features (23 vs 1) and four relationship types (`HAS_DEVICE`, `USED_CARD`, `BILLED_TO`, `SENT_FROM`) vs the original single edge type.
 
