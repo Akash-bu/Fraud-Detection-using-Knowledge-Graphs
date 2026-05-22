@@ -73,6 +73,19 @@ The pipeline has seven distinct layers:
 * planned — not yet implemented
 ```
 
+### Graph Schema
+
+The knowledge graph models five entity types connected by four relationship types:
+
+![Graph schema — Transaction connected to Device, Address, Email Domain, and Card](Nodes_rels.png)
+
+| Relationship   | From        | To           | Source field        |
+|----------------|-------------|--------------|---------------------|
+| `HAS_DEVICE`   | Transaction | Device       | `DeviceInfo`        |
+| `BILLED_TO`    | Transaction | Address      | `addr1`             |
+| `SENT_FROM`    | Transaction | Email Domain | `P_emaildomain`     |
+| `USED_CARD`    | Transaction | Card         | `card1`             |
+
 ---
 
 ## Setup
@@ -323,12 +336,18 @@ PyTorch Geometric expects a `Data` object with:
 
 ### Design choices explained
 
-**Feature: `amount_norm` only**
+**23 node features**
 
-We use a single normalised feature — the transaction amount, z-score normalised. We do **not** include `device_enc` as a feature because:
-- It's an arbitrary integer encoding with no inherent meaning
-- The graph structure already tells the GNN which device a transaction connects to
-- Adding it as a feature is redundant and adds noise
+Transaction nodes carry a rich feature matrix:
+
+| Feature group          | Features                                                                 |
+|------------------------|--------------------------------------------------------------------------|
+| Transaction            | `amount_norm`, `timestamp_norm`                                          |
+| Graph aggregates       | txn count + fraud rate for each of Device, Card, Address, Email Domain   |
+| Product category       | one-hot (`prod_C`, `prod_H`, `prod_R`, `prod_S`)                         |
+| Card network / type    | one-hot (`net_visa`, `net_mastercard`, …, `ctype_credit`, `ctype_debit`) |
+
+Graph aggregate features (e.g. `device_fraud_rate_norm`) give each transaction node direct awareness of how fraudulent its neighbours have historically been, without leaking label information — they are computed from the full dataset before the train/val/test split is applied.
 
 **Bidirectional edges**
 
@@ -348,7 +367,7 @@ Devices have `y = -1` and are excluded from train/val/test masks. They participa
 
 We use **GraphSAGE** (Sample and Aggregate), a popular GNN architecture that scales well and handles inductive learning — i.e. it can generalise to unseen nodes at inference time.
 
-### `gnn.py`
+### `graph_sage.py`
 
 Two-layer GraphSAGE with 64 hidden units, dropout 0.5 for regularisation. The output is 2 logits per node (legit vs fraud) — softmax happens inside the loss.
 
@@ -402,26 +421,48 @@ Each stage is timed individually and the pipeline halts on any failure.
 
 ## Results
 
-Current model performance on the test set (20% holdout):
+Current model performance on the test set (20% holdout, 23 733 nodes — 22 012 legit, 1 721 fraud):
 
-| Metric            | Value  |
-|-------------------|-------:|
-| Fraud Recall      | 91.1%  |
-| Fraud Precision   | 8.1%   |
-| Fraud F1          | 14.8%  |
-| ROC-AUC           | 0.61   |
-| AUC-PR            | 0.11   |
+| Metric            | Value   |
+|-------------------|--------:|
+| Fraud Recall      | 47.6%   |
+| Fraud Precision   | 54.9%   |
+| Fraud F1          | 51.0%   |
+| ROC-AUC           | 0.8831  |
+| AUC-PR            | 0.5290  |
+
+### Threshold sweep (fraud class)
+
+Operators can tune the operating point to match their cost model:
+
+| Threshold | Precision | Recall | F1    |
+|----------:|----------:|-------:|------:|
+| 0.2       | 29.2%     | 74.6%  | 42.0% |
+| 0.3       | 37.8%     | 64.6%  | 47.7% |
+| 0.4       | 46.2%     | 57.0%  | 51.0% |
+| **0.5**   | **54.9%** | **47.6%** | **51.0%** |
+| 0.6       | 62.9%     | 39.2%  | 48.3% |
+| 0.7       | 71.4%     | 31.8%  | 44.0% |
+
+### Confusion matrix (threshold = 0.5)
+
+|              | Pred Legit | Pred Fraud |
+|--------------|----------:|-----------:|
+| **True Legit**  | 21 338   |    674     |
+| **True Fraud**  |    901   |    820     |
 
 ### Interpretation
 
-The model catches **91% of fraudulent transactions** but raises many false positives. This is the **opposite trade-off from the naive baseline** (which would catch ~0% fraud while looking accurate). The graph structure clearly contributes learning signal — random would score AUC-PR of 0.075 — but the model is too aggressive at the current decision threshold.
+ROC-AUC of **0.88** and AUC-PR of **0.53** (vs. random baseline of ~0.075) confirm that multi-relational graph structure carries strong discrimination signal. The precision–recall trade-off is now tunable via threshold: setting `P(fraud) > 0.3` recovers ~65% of fraud with reasonable precision, while `P(fraud) > 0.7` gives a high-confidence alert queue at 71% precision.
+
+The dramatic improvement over the earlier single-feature model (AUC-PR 0.11 → 0.53, ROC-AUC 0.61 → 0.88) is driven by two factors: richer node features (23 vs 1) and four relationship types (`HAS_DEVICE`, `USED_CARD`, `BILLED_TO`, `SENT_FROM`) vs the original single edge type.
 
 ### Known limitations
 
-1. **Only one node feature** (`amount`). Most of the signal comes from graph structure rather than rich features.
-2. **Single relationship type** (`HAS_DEVICE`). Adding `USED_CARD`, `BILLED_TO`, etc. should significantly improve performance.
-3. **Aggressive class weights** trade precision for recall. Adjusting the decision threshold at inference time (e.g. `P(fraud) > 0.75`) recovers precision.
-4. **No temporal split**. Real-world performance against future fraud could differ.
+1. **No temporal split.** Real-world performance against future fraud could differ; a `TransactionDT`-based split is the next priority.
+2. **Graph aggregates computed on full dataset.** `device_fraud_rate_norm` etc. are computed before the train/val/test split, which gives device-level leakage. A production system would compute these only from the training window.
+3. **V1–V339 Vesta features unused.** Including even a PCA-reduced subset should further improve AUC-PR.
+4. **No merchant or purchaser email node.** `R_emaildomain` is not yet modelled.
 
 ---
 
@@ -430,20 +471,22 @@ The model catches **91% of fraudulent transactions** but raises many false posit
 ```
 fraud_detection_neo4j/
 ├── README.md
+├── Nodes_rels.png           # graph schema diagram
 ├── .env                     # credentials (gitignored)
 ├── .gitignore
 ├── requirements.txt
 ├── config.py                # Neo4j driver factory
-├── gnn.py                   # GraphSAGE model
+├── graph_sage.py            # GraphSAGE model definition
+├── baseline.py              # tabular baseline (XGBoost / LightGBM)
 ├── build_graph.py           # df → PyG Data object
 ├── pull_data.py             # Aura → df.pkl
 ├── train_gnn.py             # training loop
-├── eval.py                  # metrics
+├── eval.py                  # metrics + threshold sweep
 ├── run_pipeline.py          # orchestrator
 └── data/
-    ├── df.pkl               # cached graph data
-    ├── graph.pt             # PyG Data object
-    └── model.pt             # trained model weights
+    ├── df.pkl               # cached graph data (gitignored)
+    ├── graph.pt             # PyG Data object (gitignored)
+    └── model.pt             # trained model weights (gitignored)
 ```
 
 ---

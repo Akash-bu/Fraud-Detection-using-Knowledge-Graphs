@@ -1,0 +1,23 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Conda environment (committed by mistake)
+neo4j/
+
+# Data & model artifacts
+data/
+*.pkl
+*.pt
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
