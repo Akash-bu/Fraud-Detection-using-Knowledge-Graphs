@@ -4,3 +4,6 @@ neo4j
 pandas
 scikit-learn
 python-dotenv
+fastapi
+uvicorn[standard]
+pydantic>=2

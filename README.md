@@ -17,6 +17,7 @@ End-to-end fraud detection system that combines **Neo4j knowledge graphs** with 
 - [Step 6 — Build the PyG Graph Object](#step-6--build-the-pyg-graph-object)
 - [Step 7 — Train the GNN](#step-7--train-the-gnn)
 - [Step 8 — Evaluate](#step-8--evaluate)
+- [Step 9 — Serve the Model (Web App)](#step-9--serve-the-model-web-app)
 - [Running the Pipeline](#running-the-pipeline)
 - [Results](#results)
 - [Project Structure](#project-structure)
@@ -398,6 +399,127 @@ For imbalanced fraud detection, **accuracy is misleading**. A trivial model pred
 
 ---
 
+## Step 9 — Serve the Model (Web App)
+
+A trained model is only useful if it can score live transactions. The repo
+ships with a **FastAPI inference backend** and a **React frontend** ("Sentinel")
+that together let either a customer or an analyst score any transaction against
+the live GNN and see the supporting graph signals.
+
+![Sentinel landing page — hero with live model metrics and the analyzer below](webapp-hero.png)
+
+### Two audiences, one model
+
+The IEEE-CIS dataset is **anonymized** — `card`/`address` IDs are internal
+Vesta integers, not real card numbers or street addresses. A customer simply
+doesn't know those values. The UI exposes two modes so both audiences can use
+the same model:
+
+- **Consumer mode** *(default)* — plain-language inputs: email, "iPhone / Android /
+  Windows / Mac", and "what are you buying?". The backend translates these into
+  the features the model was actually trained on, then shows the user exactly
+  what it did so the mapping is transparent.
+- **Analyst mode** — searchable dropdowns over the real entity IDs from the
+  graph, annotated with each entity's historical fraud rate. This is the
+  fraud-analyst workbench view.
+
+### How inference works
+
+Single-transaction inference on a GNN is non-trivial: the model's predictive
+power comes from message passing over the entity graph, not just the row's own
+features. The backend handles this by:
+
+1. Loading `data/df.pkl`, replaying the deterministic train split, and re-fitting
+   the scaler + entity-stats lookups exactly as `build_graph.py` does at
+   training time.
+2. For each request, appending the new transaction as a node onto the cached
+   graph and wiring bidirectional edges to whichever existing Device / Card /
+   Address / Email Domain nodes the request names.
+3. Running a fresh forward pass and reading the softmax at the new node's index.
+
+Unseen entities (e.g. a brand-new device) get zero-history features and no
+graph link — the GNN then has to rely on the row's own features (amount,
+product, card metadata) without neighbourhood context.
+
+### Consumer mode in action
+
+A $21 000 web-hosting purchase from a Windows PC scores 95% fraud — driven by
+the wildly out-of-distribution amount and the elevated fraud rate on the
+mapped `Windows` device fingerprint:
+
+![Consumer mode flagging a $21,000 web-hosting purchase as 95% fraud](webapp-consumer-fraud.png)
+
+After every prediction, the UI shows **how it read your transaction** — the
+translation from plain-language inputs into the model's vocabulary — followed
+by the per-entity signals that drove the score:
+
+![Translation panel + explanation panel showing per-entity fraud rates](webapp-consumer-translation.png)
+
+### Analyst mode
+
+For stakeholders or analysts, the dropdown view operates directly on the
+graph's anonymized IDs and includes one-click **Clean preset** / **Fraud-ring
+preset** buttons to demo extremes. Below: hand-picking a 100%-historical-fraud
+device + card scores 100% fraud with all four entity signals lit up:
+
+![Analyst mode showing a 100% fraud verdict driven by Device, Card, Address, and Email signals](webapp-analyst-mode.png)
+
+### Under the hood (on the page itself)
+
+The site also documents the pipeline and graph schema for visitors who want
+to understand *why* the model works, not just *that* it does:
+
+![Model section showing the knowledge graph schema and 5-stage pipeline](webapp-model-section.png)
+
+### Backend
+
+```bash
+pip install -r requirements.txt          # adds fastapi + uvicorn
+uvicorn backend.app:app --reload --port 8000
+```
+
+Endpoints:
+
+| Method | Path                            | Purpose                                                |
+|--------|---------------------------------|--------------------------------------------------------|
+| GET    | `/api/health`                   | Liveness probe                                         |
+| GET    | `/api/options`                  | Product / card-network / card-type categories          |
+| GET    | `/api/entities/{kind}`          | Catalog of known devices / cards / addresses / emails  |
+| POST   | `/api/predict`                  | Score a transaction (analyst payload)                  |
+| GET    | `/api/consumer/options`         | Lay-friendly dropdown values (device & merchant categories) |
+| POST   | `/api/consumer/predict`         | Score a consumer-style transaction; response includes the input→feature translation |
+
+### Frontend
+
+A Vite + React + Tailwind app under `frontend/`, trust-blue corporate styling.
+
+```bash
+cd frontend
+npm install
+npm run dev          # http://localhost:5173
+```
+
+The Vite dev server proxies `/api/*` to `http://127.0.0.1:8000`, so the two
+processes run side-by-side during development.
+
+### Features
+
+- **Mode toggle** (Consumer / Analyst) at the top of the analyzer — same model,
+  two surfaces.
+- **Consumer translation panel** — transparent table of what the user said
+  vs. what the model saw, with an honest caveat about the anonymized dataset.
+- **Searchable dropdowns** (Analyst mode) of real device / card / address /
+  email values, each annotated with its historical fraud rate.
+- **Verdict card** with fraud probability, decision threshold, and a coloured
+  confidence bar.
+- **Explanation panel** showing per-entity fraud history, an amount-vs-population
+  check, and a plain-English summary — readable as a fraud-analyst report
+  rather than a black-box score.
+- **Presets** (`Clean` / `Fraud-ring`, Analyst mode) one-click populate the
+  form with extreme examples for quick demos.
+
+---
+
 ## Running the Pipeline
 
 A single orchestrator runs everything in order:
@@ -469,17 +591,41 @@ The dramatic improvement over the earlier single-feature model (AUC-PR 0.11 → 
 fraud_detection_neo4j/
 ├── README.md
 ├── Nodes_rels.png           # graph schema diagram
+├── bloom-visualisation.png  # Neo4j Bloom view of the graph
+├── webapp-*.png             # Sentinel web-app screenshots
 ├── .env                     # credentials (gitignored)
 ├── .gitignore
 ├── requirements.txt
 ├── config.py                # Neo4j driver factory
 ├── graph_sage.py            # GraphSAGE model definition
 ├── baseline.py              # tabular baseline (XGBoost / LightGBM)
-├── build_graph.py           # df → PyG Data object
+├── build_graph.py           # df → PyG Data object (+ inference context)
 ├── pull_data.py             # Aura → df.pkl
 ├── train_gnn.py             # training loop
-├── eval.py                  # metrics + threshold sweep
+├── eval.py                  # metrics
 ├── run_pipeline.py          # orchestrator
+├── backend/                 # FastAPI inference server
+│   ├── app.py               # routes: /options, /entities, /predict, /consumer/*
+│   └── inference.py         # Engine + Consumer→model mapping
+├── frontend/                # Vite + React + Tailwind "Sentinel" UI
+│   ├── index.html
+│   ├── package.json
+│   ├── tailwind.config.js
+│   ├── vite.config.js
+│   └── src/
+│       ├── App.jsx                       # mode toggle + page layout
+│       ├── api.js
+│       └── components/
+│           ├── Header.jsx
+│           ├── Hero.jsx
+│           ├── ConsumerForm.jsx          # lay-friendly form (default mode)
+│           ├── TransactionForm.jsx       # analyst form (anonymized IDs)
+│           ├── EntitySelect.jsx          # searchable dropdown w/ fraud-rate pills
+│           ├── VerdictCard.jsx
+│           ├── ExplanationPanel.jsx
+│           ├── TranslationPanel.jsx      # consumer→model mapping display
+│           ├── ModelSection.jsx
+│           └── Footer.jsx
 └── data/
     ├── df.pkl               # cached graph data (gitignored)
     ├── graph.pt             # PyG Data object (gitignored)
