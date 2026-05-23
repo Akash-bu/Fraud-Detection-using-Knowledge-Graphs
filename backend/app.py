@@ -9,10 +9,12 @@ Endpoints:
 
 from __future__ import annotations
 
-from typing import Optional
+import json
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .inference import (
@@ -23,6 +25,8 @@ from .inference import (
     DEVICE_CATEGORY_LABEL,
     MERCHANT_CATEGORY_LABEL,
 )
+from .llm.client import initial_messages, stream_explanation
+from .llm.retrieval import build_evidence
 
 
 app = FastAPI(
@@ -133,3 +137,63 @@ def consumer_predict(payload: ConsumerPayload):
     result = engine.predict(req)
     result['mapping'] = translation     # show the user what we translated
     return result
+
+
+# ── LLM Explainer (streaming chat) ──────────────────────────────────────
+
+
+class ChatMessage(BaseModel):
+    role: str               # 'user' | 'assistant'
+    content: str
+
+
+class ExplainPayload(BaseModel):
+    """A flagged transaction the LLM should explain.
+
+    `payload` is the request that produced `prediction` (analyst-mode shape
+    after the consumer-mode mapping has been applied — so the LLM always
+    reasons about the same set of fields). `messages` is the prior chat
+    history for follow-up turns; empty on the first call (the server seeds
+    the initial prompt).
+    """
+    payload: dict[str, Any]
+    prediction: dict[str, Any]
+    messages: list[ChatMessage] = Field(default_factory=list)
+
+
+@app.post("/api/explain")
+async def explain(body: ExplainPayload):
+    if engine is None:
+        raise HTTPException(503, "Model not loaded yet")
+
+    evidence = build_evidence(engine, body.payload, body.prediction)
+
+    # First turn: seed with the canonical "give me the headline" prompt.
+    # Follow-up turns: trust whatever conversation the client sent.
+    if body.messages:
+        messages = [m.model_dump() for m in body.messages]
+    else:
+        messages = initial_messages()
+
+    async def event_stream():
+        async for event in stream_explanation(evidence, messages):
+            # SSE wire format: "data: <json>\n\n" per event
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable proxy buffering for true streaming
+        },
+    )
+
+
+@app.post("/api/explain/evidence")
+def explain_evidence(body: ExplainPayload):
+    """Return just the evidence packet — used by the UI for the
+    'verify the citation' panel without round-tripping through Claude."""
+    if engine is None:
+        raise HTTPException(503, "Model not loaded yet")
+    return build_evidence(engine, body.payload, body.prediction)

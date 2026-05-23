@@ -8,6 +8,7 @@ import ExplanationPanel from './components/ExplanationPanel.jsx'
 import TranslationPanel from './components/TranslationPanel.jsx'
 import ModelSection from './components/ModelSection.jsx'
 import Footer from './components/Footer.jsx'
+import ExplainerChat from './components/ExplainerChat.jsx'
 
 const MODES = [
   {
@@ -28,11 +29,13 @@ export default function App() {
   const [submittedForm, setSubmittedForm] = useState(null)
   const [mapping, setMapping] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
 
   function handleResult(r, form) {
     setResult(r)
     setSubmittedForm(form)
     if (!r) setMapping(null)
+    setChatOpen(false)   // close any open chat — it was about the prior result
   }
 
   function switchMode(next) {
@@ -41,6 +44,7 @@ export default function App() {
     setResult(null)
     setSubmittedForm(null)
     setMapping(null)
+    setChatOpen(false)
   }
 
   const activeMode = MODES.find((m) => m.key === mode)
@@ -77,7 +81,12 @@ export default function App() {
               )}
             </div>
             <div className="space-y-6 lg:col-span-2">
-              <VerdictCard result={result} loading={loading} form={submittedForm} />
+              <VerdictCard
+                result={result}
+                loading={loading}
+                form={submittedForm}
+                onAskAnalyst={result ? () => setChatOpen(true) : null}
+              />
             </div>
           </div>
 
@@ -97,6 +106,13 @@ export default function App() {
 
       <ModelSection />
       <Footer />
+
+      <ExplainerChat
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        result={result}
+        form={submittedForm}
+      />
     </div>
   )
 }

@@ -1,4 +1,4 @@
-export default function VerdictCard({ result, loading, form }) {
+export default function VerdictCard({ result, loading, form, onAskAnalyst }) {
   if (loading) {
     return (
       <div className="card flex h-full flex-col items-center justify-center gap-3 p-10 text-center">
@@ -60,6 +60,24 @@ export default function VerdictCard({ result, loading, form }) {
         {result.explanation?.summary}
       </div>
 
+      {onAskAnalyst && (
+        <div className="border-t border-navy-100 px-6 py-3">
+          <button
+            type="button"
+            onClick={onAskAnalyst}
+            className="group inline-flex w-full items-center justify-between rounded-md border border-navy-200 bg-white px-4 py-2.5 text-sm font-semibold text-navy-800 transition hover:border-navy-400 hover:bg-navy-50"
+          >
+            <span className="flex items-center gap-2">
+              <SparkleIcon />
+              Ask the Sentinel analyst
+            </span>
+            <span className="text-xs text-navy-500 group-hover:text-navy-700">
+              AI-authored, evidence-grounded
+            </span>
+          </button>
+        </div>
+      )}
+
       <Receipt form={form} />
     </div>
   )
@@ -115,6 +133,16 @@ function ShieldIcon() {
         strokeLinejoin="round"
       />
       <path d="M11 16 L15 20 L22 12" stroke="#D9A441" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function SparkleIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" className="text-gold-500">
+      <path d="M10 2 L11.5 7 L16 8.5 L11.5 10 L10 15 L8.5 10 L4 8.5 L8.5 7 Z" fill="currentColor" />
+      <circle cx="16" cy="4" r="1" fill="currentColor" />
+      <circle cx="4" cy="15" r="1" fill="currentColor" />
     </svg>
   )
 }

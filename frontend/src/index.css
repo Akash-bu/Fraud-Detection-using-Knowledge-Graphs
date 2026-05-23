@@ -42,3 +42,41 @@
 }
 .combobox-list::-webkit-scrollbar { width: 6px; }
 .combobox-list::-webkit-scrollbar-thumb { background: #B9CCE5; border-radius: 4px; }
+
+/* Chat prose — narrow, comfortable line-height for the analyst drawer */
+.prose-narrow p              { margin: 0 0 0.65rem; line-height: 1.55; }
+.prose-narrow p:last-child   { margin-bottom: 0; }
+.prose-narrow ul             { margin: 0 0 0.65rem; padding-left: 1.1rem; list-style: disc; }
+.prose-narrow ul li          { margin: 0.15rem 0; line-height: 1.5; }
+.prose-narrow strong         { color: #0A2540; font-weight: 600; }
+.prose-narrow em             { font-style: italic; }
+.prose-narrow code           {
+  background: #fff;
+  border: 1px solid #E1EAF5;
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.78rem;
+  color: #1F4478;
+}
+
+/* Inline citation chips inside chat prose */
+.cite {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: #fff;
+  border: 1px solid #B9CCE5;
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.7rem;
+  line-height: 1.3;
+  vertical-align: baseline;
+  margin: 0 1px;
+  color: #1F4478;
+  cursor: help;
+}
+.cite .cite-path { color: #5783B4; }
+.cite .cite-val  { color: #0A2540; font-weight: 600; }
+.cite:hover { background: #F2F6FB; border-color: #5783B4; }

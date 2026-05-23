@@ -31,6 +31,16 @@ export default function Footer() {
               <li>API · FastAPI · UI · React + Vite</li>
             </ul>
           </div>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-navy-400">
+              Contact
+            </div>
+            <ul className="mt-3 space-y-2 text-sm">
+              <li>Akash</li>
+              <li>akbaum@mail.uni-paderborn.de</li>
+              <li>Made in Paderborn, Germany</li>
+            </ul>
+          </div>
         </div>
         <div className="mt-10 border-t border-navy-800 pt-6 text-xs text-navy-400">
           © Sentinel demo · Predictions are illustrative — not financial advice.

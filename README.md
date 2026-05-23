@@ -18,6 +18,7 @@ End-to-end fraud detection system that combines **Neo4j knowledge graphs** with 
 - [Step 7 — Train the GNN](#step-7--train-the-gnn)
 - [Step 8 — Evaluate](#step-8--evaluate)
 - [Step 9 — Serve the Model (Web App)](#step-9--serve-the-model-web-app)
+- [Step 10 — LLM Explainer (RAG over the Graph)](#step-10--llm-explainer-rag-over-the-graph)
 - [Running the Pipeline](#running-the-pipeline)
 - [Results](#results)
 - [Project Structure](#project-structure)
@@ -520,6 +521,355 @@ processes run side-by-side during development.
 
 ---
 
+## Step 10 — LLM Explainer (RAG over the Graph)
+
+A GNN gives you a score. It doesn't give you a story an operator can act
+on. **Sentinel Analyst** is a streaming chat layer powered by an open-source
+LLM (**DeepSeek V4 Pro** by default, served via the **HuggingFace Router**)
+that explains every prediction in plain language — grounded in the same
+trained-graph statistics the GNN itself uses, with inline citations so the
+operator can verify every claim.
+
+### In action
+
+Every prediction sprouts an **"Ask the Sentinel analyst"** button on the
+verdict card. Clicking it opens a streaming chat drawer that explains the
+verdict and accepts follow-up questions:
+
+![Verdict card showing the 'Ask the Sentinel analyst' entry point](webapp-chatbot-1.png)
+
+The drawer streams an evidence-grounded explanation token-by-token, with
+**inline citation chips** (e.g. `entities.device.fraud_rate`) the analyst
+can hover to verify against the same data shown in the panels below. The
+example below shows a multi-turn investigation of a borderline-LEGIT
+verdict — including a follow-up *"What would change the model's mind?"*
+and the suggested follow-up chips at the bottom:
+
+![Streaming chat drawer with citations, follow-up Q&A, and suggestion chips](webapp-chatbot.png)
+
+### The flow
+
+```
+Flagged transaction + GNN prediction
+        ↓
+build_evidence() → structured fact packet
+        ↓                      pulled from:
+        ├─ entities          • engine.context['entity_stats']  (training-set
+        ├─ peers               counts + fraud rates per entity)
+        ├─ amount_context    • engine.df  (peer transactions, distribution)
+        └─ population
+        ↓
+DeepSeek (streaming via HF Router, OpenAI-compatible API)
+        ↓
+Markdown with inline citations: [device.fraud_rate=1.0]
+        ↓
+React drawer renders prose + citation chips
+```
+
+The evidence packet is the **only** thing the LLM is allowed to cite. The
+system prompt makes this explicit ("facts outside this block are off-
+limits") and instructs the model to use dotted citation paths into the
+JSON — e.g. `[device.fraud_rate=1.0]`, `[peers.device.txn_3105398.fraud=true]`.
+The frontend renders each citation as a chip with a tooltip; a curious
+analyst can verify the claim against the same data shown in the
+ExplanationPanel directly below.
+
+### Why this design
+
+| Decision | Rationale |
+|---|---|
+| **Retrieval from `engine.df`, not live Neo4j** | The df is the materialized projection of the graph and is already in memory — retrieval is microseconds, not a round-trip. A future phase can layer in live Neo4j queries for cross-session vector search. |
+| **Pre-written facts, no text-to-Cypher** | Text-to-Cypher adds a hallucination layer on top of an already-hallucinatory layer. Phase A is strictly grounded; ad-hoc Cypher is Phase C with strict allow-list validation. |
+| **Markdown streaming, not structured JSON** | Chat UX needs first-token latency. The structured-output-via-schema path streams as one big block at the end; markdown with inline citations gives the same audit guarantees in a chat-native shape. |
+| **OpenAI SDK pointed at HF Router** | DeepSeek + other open-source models are routed through `router.huggingface.co/v1` with the standard OpenAI client. Swapping to Llama, Mixtral, or any other HF-routed model is a single env var (`EXPLAINER_MODEL`) — no code changes. |
+| **Stateless server** | The client holds the conversation history and sends it back each turn. No per-thread state on the server; horizontal scaling is trivial. |
+
+### Implementation details
+
+This section is for anyone who wants to read the code or replicate the
+pattern. Three concrete things: what the evidence looks like, what call
+the backend makes, and how streaming flows end-to-end.
+
+#### 1. The evidence packet
+
+[backend/llm/retrieval.py](backend/llm/retrieval.py) builds a single dict
+the LLM is allowed to cite from. For the fraud-ring preset
+(`device="VS5012 Build/NRD90M"`, $1.50, `email_domain="gmail.com"`) it
+looks like this (truncated):
+
+```json
+{
+  "transaction": {
+    "amount": 1.5, "product": "C", "card_network": "visa", "card_type": "credit",
+    "verdict": "FRAUD", "fraud_probability": 0.81, "decision_threshold": 0.4
+  },
+  "entities": {
+    "device":       { "present": true,  "known": true,  "value": "VS5012 Build/NRD90M",
+                      "txn_count": 26, "fraud_rate": 1.0, "fraud_count": 26, "severity": "high" },
+    "card":         { "present": false, "known": false, "value": null },
+    "address":      { "present": false, "known": false, "value": null },
+    "email_domain": { "present": true,  "known": true,  "value": "gmail.com",
+                      "txn_count": 31199, "fraud_rate": 0.1052, "fraud_count": 3283, "severity": "medium" }
+  },
+  "peers": {
+    "device": [
+      { "txn_id": 3383086, "amount": 37.46, "fraud": true, "product": "C" },
+      { "txn_id": 3383091, "amount": 37.46, "fraud": true, "product": "C" }
+      // … up to 5
+    ]
+  },
+  "amount_context": {
+    "value": 1.5, "percentile": 0.0013, "mean": 90.48,
+    "median": 50.0, "p95": 240.0, "p99": 500.0, "max": 31937.39
+  },
+  "population": { "total_transactions": 118666, "fraud_rate_overall": 0.0725 }
+}
+```
+
+Every leaf in this tree is **a fact with a stable path**. When the LLM
+writes `[device.fraud_rate=1.0]`, the frontend can resolve `device →
+entities.device → fraud_rate` and verify `1.0` against the same source
+of truth the ExplanationPanel below already shows.
+
+Unseen entities (here `card` and `address`) get `present: false` rather
+than being omitted — so the model can explicitly attribute *absence* of
+context rather than silently leaving them out.
+
+#### 2. The LLM call (OpenAI SDK → HF Router)
+
+[backend/llm/client.py](backend/llm/client.py) does exactly this, simplified:
+
+```python
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI(
+    base_url="https://router.huggingface.co/v1",   # EXPLAINER_BASE_URL
+    api_key=os.environ["HF_TOKEN"],
+)
+
+stream = await client.chat.completions.create(
+    model="deepseek-ai/DeepSeek-V4-Pro:fireworks-ai",   # EXPLAINER_MODEL
+    messages=[
+        {"role": "system",  "content": BASE_SYSTEM + "\n\n" + render_evidence_block(evidence)},
+        *messages,                                       # full conversation history
+    ],
+    max_tokens=2048,
+    stream=True,
+    stream_options={"include_usage": True},
+)
+
+async for chunk in stream:
+    if chunk.usage is not None:
+        usage = chunk.usage                              # arrives in the final chunk
+    if chunk.choices:
+        delta = chunk.choices[0].delta
+        if delta and delta.content:
+            yield {"type": "text", "content": delta.content}
+```
+
+Three things worth noting:
+
+- **Single system message.** Unlike Anthropic's array-of-blocks shape,
+  the OpenAI/HF Router API takes one string. Base instructions + evidence
+  get concatenated.
+- **`stream_options.include_usage`** is what makes the final chunk carry
+  `prompt_tokens` / `completion_tokens` — without it, token usage is
+  unavailable on streaming responses.
+- **Errors are yielded, not raised.** `AuthenticationError`, `RateLimitError`,
+  and `APIStatusError` become `{type: "error", message: ...}` events on
+  the SSE stream so the chat UI can render them as a graceful card
+  instead of a broken connection.
+
+#### 3. The SSE wire format
+
+[backend/app.py](backend/app.py)'s `/api/explain` wraps the generator in
+a `StreamingResponse(media_type="text/event-stream")` and emits one event
+per line, framed by a blank line:
+
+```
+data: {"type": "text", "content": "**"}\n\n
+data: {"type": "text", "content": "V"}\n\n
+data: {"type": "text", "content": "erd"}\n\n
+...
+data: {"type": "done", "usage": {"input_tokens": 1484, "output_tokens": 425}}\n\n
+```
+
+On the frontend, [api.js](frontend/src/api.js)'s `streamExplain()` is an
+**async generator** that reads the `fetch` body as a `ReadableStream`,
+buffers partial lines until it sees `\n\n`, and yields each parsed event:
+
+```js
+const reader = res.body.getReader()
+const decoder = new TextDecoder()
+let buffer = ''
+
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  buffer += decoder.decode(value, { stream: true })
+
+  let idx
+  while ((idx = buffer.indexOf('\n\n')) !== -1) {
+    const chunk = buffer.slice(0, idx); buffer = buffer.slice(idx + 2)
+    for (const line of chunk.split('\n')) {
+      if (line.startsWith('data: ')) {
+        yield JSON.parse(line.slice(6))
+      }
+    }
+  }
+}
+```
+
+[ExplainerChat.jsx](frontend/src/components/ExplainerChat.jsx) consumes
+this with `for await (const ev of stream)` and appends each `text` event
+to the currently-streaming assistant bubble. An `AbortController` passed
+to `fetch` lets the **Stop** button cancel mid-stream cleanly.
+
+#### 4. Conversation state — stateless server, client holds history
+
+There is **no per-thread state on the server**. Every request to
+`/api/explain` carries the entire conversation:
+
+```json
+{
+  "payload":   { ... },                       // the transaction (unchanged)
+  "prediction": { ... },                      // the GNN's verdict (unchanged)
+  "messages": [
+    { "role": "user",      "content": "..." },
+    { "role": "assistant", "content": "..." },
+    { "role": "user",      "content": "What about the address signal?" }
+  ]
+}
+```
+
+The server rebuilds the evidence packet from the same `payload` +
+`prediction` each turn (it's cheap — pandas lookups on an in-memory df),
+prepends the system message, and runs the stream. This means:
+
+- **No session store, no Redis, no cleanup job.** Horizontal scaling is
+  trivial.
+- **Cancellation is automatic.** Close the SSE connection and the
+  conversation simply ends — there's no orphaned state to garbage-
+  collect.
+- **The first turn is special.** When `messages` is empty, the server
+  injects a canonical "give me the headline" prompt
+  ([prompts.py](backend/llm/prompts.py) `INITIAL_USER_PROMPT`) so the
+  initial explanation always has the same shape.
+
+#### 5. The citation chip renderer
+
+[markdown.js](frontend/src/components/markdown.js) is a 60-line custom
+markdown subset — paragraphs, `**bold**`, `*italic*`, `` `code` ``,
+bulleted lists, and the citation regex:
+
+```js
+const CITATION_RE = /\[([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)(?:=([^\]]+))?\]/gi
+```
+
+Matched citations become hoverable chips that show the dotted path as a
+tooltip. The renderer HTML-escapes input before applying replacements,
+so it's safe to feed directly to `dangerouslySetInnerHTML`. **No npm
+dependency** for markdown — the bundle stayed under 60 KB gzipped.
+
+#### 6. Honest limits of Phase A
+
+- **The citation contract is enforced by prompt, not by code.** The
+  system prompt says "if a path doesn't resolve, you've hallucinated."
+  Phase C will add a server-side validator that parses citations and
+  rejects responses whose paths don't resolve in the evidence dict.
+- **Retrieval is from the cached df, not live Neo4j.** Same data
+  (df is the materialized graph), but means we can't (yet) query
+  cross-session: "what other devices share this card today?" needs a
+  live Cypher call.
+- **No streaming "thinking" indicator.** DeepSeek V4 Pro doesn't expose
+  separate reasoning chunks via the HF Router; if you swap in a
+  reasoning model that does, the SSE shape would need a `{type: "thinking"}`
+  event variant.
+
+### Setup
+
+The explainer needs a HuggingFace token. Get one at
+[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens),
+then add it to your `.env` file.
+
+**If you don't have a `.env` yet** (fresh clone):
+
+```bash
+cp .env.example .env       # creates .env from the committed template
+# then edit .env and paste your token
+```
+
+**If you already have a `.env`** (e.g. you've been using Neo4j Aura): just
+**append** the line below — don't overwrite the file:
+
+```bash
+HF_TOKEN=hf_…              # paste your real token here
+```
+
+Optional knobs (all have sensible defaults):
+
+```bash
+# EXPLAINER_MODEL=deepseek-ai/DeepSeek-V4-Pro:fireworks-ai   # default
+# EXPLAINER_MODEL=meta-llama/Llama-3.3-70B-Instruct:together # alt open model
+# EXPLAINER_BASE_URL=https://router.huggingface.co/v1        # change provider
+# EXPLAINER_API_KEY_ENV=HF_TOKEN                             # which env var holds the key
+# EXPLAINER_MAX_TOKENS=2048
+```
+
+Restart `uvicorn` so it picks up the new env var. Without the token the
+chat panel shows a graceful **"Analyst unavailable"** message — the rest
+of the app still works.
+
+The OpenAI-compatible API surface means **any** model exposed through the
+HF Router (or any other OpenAI-compatible endpoint — Together, Fireworks,
+a local Ollama at `http://localhost:11434/v1`) drops in via the
+`EXPLAINER_BASE_URL` / `EXPLAINER_MODEL` env vars without a code change.
+
+### Endpoints
+
+| Method | Path                       | Purpose                                                |
+|--------|----------------------------|--------------------------------------------------------|
+| POST   | `/api/explain`             | **SSE stream** of `{type:"text", content}` events ending in `{type:"done", usage}` |
+| POST   | `/api/explain/evidence`    | The evidence packet alone (no LLM call) — useful for debugging citations |
+
+Request body for both:
+
+```json
+{
+  "payload":   { "amount": 1.5, "product": "C", "device": "VS5012 Build/NRD90M", ... },
+  "prediction": { "verdict": "FRAUD", "fraud_probability": 0.81, "threshold": 0.4 },
+  "messages":  [ ]   // empty for first turn; full history for follow-ups
+}
+```
+
+### Frontend
+
+Click **"Ask the Sentinel analyst"** on the verdict card to open a
+right-side drawer. The drawer:
+
+- Streams the initial explanation token-by-token
+- Renders inline citation chips (hover for the dotted path)
+- Offers suggested follow-up prompts after the first answer
+- Supports free-form follow-up questions (multi-turn conversation)
+- Lets the operator interrupt a long answer with a **Stop** button
+
+### Phase B + C (future work)
+
+- **Pattern-library Cypher** — pre-written motif queries (`card_testing.cypher`,
+  `shared_device_ring.cypher`) committed under `backend/motifs/`, run against
+  live Neo4j, results attached to the evidence packet as labelled kits.
+- **Similar-cases retrieval** — Neo4j 5.x vector index over confirmed-fraud
+  GNN embeddings, top-K nearest neighbours surfaced in evidence.
+- **Counterfactuals** — *"if you'd used a different device, p(fraud) drops
+  95% → 5%"* — possible because the inference path can mutate the graph at
+  request time.
+- **Cite-only validator** — parse the model's citation paths, reject any
+  that don't resolve in the evidence dict, retry with a clarifying message.
+- **Cypher-tool agent loop** — ad-hoc analyst questions ("show me all txns
+  from this device this week") via a strictly allow-listed Cypher tool.
+
+---
+
 ## Running the Pipeline
 
 A single orchestrator runs everything in order:
@@ -605,8 +955,12 @@ fraud_detection_neo4j/
 ├── eval.py                  # metrics
 ├── run_pipeline.py          # orchestrator
 ├── backend/                 # FastAPI inference server
-│   ├── app.py               # routes: /options, /entities, /predict, /consumer/*
-│   └── inference.py         # Engine + Consumer→model mapping
+│   ├── app.py               # routes: /options, /entities, /predict, /consumer/*, /explain
+│   ├── inference.py         # Engine + Consumer→model mapping
+│   └── llm/                 # LLM explainer (Claude, RAG over the graph)
+│       ├── client.py        # Anthropic streaming + prompt caching
+│       ├── retrieval.py     # build_evidence() — facts the model may cite
+│       └── prompts.py       # system prompt + citation contract
 ├── frontend/                # Vite + React + Tailwind "Sentinel" UI
 │   ├── index.html
 │   ├── package.json
@@ -624,6 +978,8 @@ fraud_detection_neo4j/
 │           ├── VerdictCard.jsx
 │           ├── ExplanationPanel.jsx
 │           ├── TranslationPanel.jsx      # consumer→model mapping display
+│           ├── ExplainerChat.jsx         # streaming LLM analyst drawer
+│           ├── markdown.js               # tiny markdown + citation renderer
 │           ├── ModelSection.jsx
 │           └── Footer.jsx
 └── data/

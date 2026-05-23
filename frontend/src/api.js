@@ -32,4 +32,51 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }).then(json),
+
+  /**
+   * Stream the LLM explainer. Yields events of shape
+   *   { type: 'text', content: '...' }   |   { type: 'done', usage: {...} }
+   *   { type: 'error', message: '...' }
+   * Pass an AbortSignal to cancel mid-stream.
+   */
+  async *streamExplain({ payload, prediction, messages = [] }, { signal } = {}) {
+    const res = await fetch('/api/explain', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload, prediction, messages }),
+      signal,
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new Error(`Explainer ${res.status}: ${text || res.statusText}`)
+    }
+    if (!res.body) throw new Error('No response body to stream')
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      // SSE framing: events are separated by double newline; each event is
+      // one or more "data: <payload>\n" lines.
+      let idx
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const chunk = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 2)
+        for (const line of chunk.split('\n')) {
+          if (line.startsWith('data: ')) {
+            try {
+              yield JSON.parse(line.slice(6))
+            } catch {
+              /* ignore malformed event */
+            }
+          }
+        }
+      }
+    }
+  },
 }

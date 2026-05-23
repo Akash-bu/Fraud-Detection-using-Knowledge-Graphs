@@ -21,8 +21,7 @@ export default function ModelSection() {
               Under the hood
             </div>
             <h2 className="font-display text-3xl font-extrabold text-navy-900 md:text-4xl">
-              A graph-native pipeline,
-              <br />not a feature flag on top of XGBoost.
+              A graph-native pipeline.
             </h2>
             <p className="mt-5 text-navy-600">
               Sentinel models payments as a knowledge graph and trains a GraphSAGE GNN over it.

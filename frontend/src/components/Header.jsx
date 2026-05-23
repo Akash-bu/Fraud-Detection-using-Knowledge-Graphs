@@ -24,7 +24,7 @@ export default function Header() {
             Model online
           </span>
           <a
-            href="https://github.com/akash-bu/fraud_detection_neo4j"
+            href="https://github.com/Akash-bu/Fraud-Detection-using-Knowledge-Graphs"
             target="_blank"
             rel="noreferrer"
             className="btn-ghost"

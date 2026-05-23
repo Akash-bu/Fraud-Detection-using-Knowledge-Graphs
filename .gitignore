@@ -26,3 +26,5 @@ frontend/.vite/
 
 # OS
 .DS_Store
+
+baseline.py
