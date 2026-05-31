@@ -68,11 +68,11 @@ The pipeline has seven distinct layers:
 ├─────────────────────────────────────────────────────────┤
 │  ⑤ GNN Model       (PyTorch Geometric — GraphSAGE)      │
 ├─────────────────────────────────────────────────────────┤
-│  ⑥ LLM Layer       (RAG over graph for explanations)*   │
+│  ⑥ LLM Layer       (RAG over graph for explanations)  │
 ├─────────────────────────────────────────────────────────┤
 │  ⑦ Output          (fraud scores + explanations)        │
 └─────────────────────────────────────────────────────────┘
-* planned — not yet implemented
+
 ```
 
 ### Graph Schema
